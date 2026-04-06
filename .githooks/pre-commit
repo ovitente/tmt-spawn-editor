@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+export PATH="$HOME/.npm-global/bin:$PATH"
+if command -v lat >/dev/null 2>&1; then
+  export LAT_LLM_KEY="${LAT_LLM_KEY:-unused}"
+  lat check || exit 1
+fi
