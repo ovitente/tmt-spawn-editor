@@ -748,6 +748,9 @@ func (m Model) View() string {
 		rightPanel = m.renderEntryPreview(rightWidth, contentHeight)
 	}
 
+	leftPanel = clampPanelLines(leftPanel, contentHeight)
+	rightPanel = clampPanelLines(rightPanel, contentHeight)
+
 	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight)
 	rightStyle := panelStyle.Width(rightWidth).Height(contentHeight)
 	if m.level == LevelEdit || m.dropActive || m.fieldEditing {
@@ -865,16 +868,29 @@ func (m Model) renderEntries(width, height int) string {
 		}
 		sb.WriteString("\n")
 	} else {
-		title := m.currentSwt.Name
-		if m.currentSwt.dirty {
-			title += dirtyStyle.Render(" [modified]")
-		}
 		count := fmt.Sprintf("%d", len(m.currentSwt.Entries))
-		pad := textWidth - lipgloss.Width(titleStyle.Render(title)) - lipgloss.Width(titleStyle.Render(count))
+		countWidth := lipgloss.Width(titleStyle.Render(count))
+		titleBudget := textWidth - countWidth - 1
+		if titleBudget < 1 {
+			titleBudget = 1
+		}
+		rawTitle := m.currentSwt.Name
+		dirtySuffix := ""
+		if m.currentSwt.dirty {
+			dirtySuffix = " [modified]"
+		}
+		if len(rawTitle)+len(dirtySuffix) > titleBudget {
+			rawTitle = clampText(rawTitle, titleBudget-len(dirtySuffix))
+		}
+		titleRendered := titleStyle.Render(rawTitle)
+		if dirtySuffix != "" {
+			titleRendered += dirtyStyle.Render(dirtySuffix)
+		}
+		pad := textWidth - lipgloss.Width(titleRendered) - countWidth
 		if pad < 1 {
 			pad = 1
 		}
-		sb.WriteString(titleStyle.Render(title) + strings.Repeat(" ", pad) + titleStyle.Render(count))
+		sb.WriteString(titleRendered + strings.Repeat(" ", pad) + titleStyle.Render(count))
 		sb.WriteString("\n\n")
 	}
 
@@ -1103,6 +1119,18 @@ func desiredEntriesWidth(entries []SpawnEntry, title string, count int, minWidth
 		return maxWidth
 	}
 	return width
+}
+
+func clampPanelLines(s string, maxLines int) string {
+	s = strings.TrimRight(s, "\n")
+	if maxLines < 1 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func clampText(s string, width int) string {

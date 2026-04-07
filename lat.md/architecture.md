@@ -24,6 +24,7 @@ Core files and responsibilities.
 
 - Levels: file list → entry list → edit fields.
 - Two-panel layout in entry mode: left list, right preview/edit.
+- Panel height alignment: both panels must render to exactly `contentHeight` lines before `panelStyle.Height(contentHeight)` is applied. Lip Gloss' `Height` only pads, it does not truncate — any overflow (trailing `\n` after the last row, wrapped long title, etc.) makes one panel taller than the other and the shorter one "floats up". `MaxHeight` is NOT a fix: it truncates the border too and eats the bottom edge of the box. Instead, clamp panel content via `clampPanelLines(s, contentHeight)` in `model.go`, which trims trailing newlines and caps the line count before rendering. Any new panel renderer must go through the same clamp. Reusable pattern for sibling tools (e.g. theme-changer).
 - Spawn changes are staged in memory and written on explicit save.
 - Entry list supports filtering by Unit/Owner/Zone/Type with Tab mode switch.
 - Entry list columns size to content width with "|" separators and header dividers.
