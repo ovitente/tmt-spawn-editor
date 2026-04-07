@@ -39,6 +39,15 @@ var (
 			Foreground(commentColor).
 			Italic(true)
 
+	columnHeaderStyle = lipgloss.NewStyle().
+				Foreground(commentColor)
+
+	headerTextStyle = lipgloss.NewStyle().
+			Foreground(commentColor)
+
+	headerSepStyle = lipgloss.NewStyle().
+			Foreground(commentColor)
+
 	dirtyStyle = lipgloss.NewStyle().
 			Foreground(dirtyColor).
 			Bold(true)

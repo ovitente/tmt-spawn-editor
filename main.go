@@ -33,14 +33,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Warning: cannot read %s: %v\n", p.Label, err)
 			continue
 		}
+		orig := append([]string(nil), paths...)
+		sorted := append([]string(nil), paths...)
+		SortSwtFiles(sorted)
 		if len(paths) == 0 {
 			fmt.Fprintf(os.Stderr, "Warning: no .swt files in %s\n", p.Label)
 			continue
 		}
 		profs = append(profs, ProfileState{
-			label: p.Label,
-			dir:   dir,
-			files: paths,
+			label:         p.Label,
+			dir:           dir,
+			files:         sorted,
+			filesOriginal: orig,
+			sorted:        true,
 		})
 	}
 

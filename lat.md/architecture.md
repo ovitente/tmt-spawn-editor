@@ -19,6 +19,19 @@ Scaffolded, ready for development.
 | [[keys.go]] | Key bindings |
 | [[styles.go]] | Lip Gloss styles |
 
+## UI behavior
+
+- Two-panel layout in entry mode: left list, right preview/edit.
+- Spawn changes are staged in memory and written on explicit save.
+- Entry list supports filtering by Unit/Owner/Zone/Type with Tab mode switch.
+- Entry list columns size to content width with "|" separators and header dividers.
+
+## Keybindings
+
+- `r` toggle file sorting (original vs numeric).
+- `c` duplicate selected spawn entry.
+- `R` restore selected spawn entry to last saved state.
+
 ## Ownership boundaries
 
 Which lat.md files are authoritative for which concerns.

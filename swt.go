@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -32,7 +35,7 @@ type swtRoot struct {
 }
 
 type swtVar struct {
-	XMLName xml.Name `xml:"Variable"`
+	XMLName xml.Name   `xml:"Variable"`
 	Attrs   []xml.Attr `xml:",any,attr"`
 }
 
@@ -55,12 +58,14 @@ type swtAction struct {
 
 // SpawnEntry is a parsed spawn action for the UI.
 type SpawnEntry struct {
-	TriggerGUID string
-	TriggerName string
-	ActionGUID  string
-	Disabled    string
-	Params      [paramCount]string // normalized (prm=? → "")
-	Original    [paramCount]string // snapshot for dirty check
+	TriggerGUID         string
+	TriggerName         string
+	OriginalTriggerName string
+	ActionGUID          string
+	Disabled            string
+	Params              [paramCount]string // normalized (prm=? → "")
+	Original            [paramCount]string // snapshot for dirty check
+	Added               bool
 }
 
 // Convenience accessors.
@@ -70,15 +75,22 @@ func (e *SpawnEntry) Zone() string       { return e.Params[5] }
 func (e *SpawnEntry) Owner() string      { return e.Params[6] }
 
 func (e *SpawnEntry) Modified() bool {
+	if e.Added {
+		return true
+	}
+	if e.TriggerName != e.OriginalTriggerName {
+		return true
+	}
 	return e.Params != e.Original
 }
 
 // SwtFile holds parsed data for one .swt file.
 type SwtFile struct {
-	Path    string
-	Name    string // basename
-	Entries []SpawnEntry
-	dirty   bool
+	Path               string
+	Name               string // basename
+	Entries            []SpawnEntry
+	dirty              bool
+	DeletedActionGUIDs []string
 }
 
 func (f *SwtFile) RecalcDirty() {
@@ -98,6 +110,9 @@ func ParseSwtFile(path string) (*SwtFile, error) {
 		return nil, err
 	}
 
+	// Sanitize invalid UTF-8 and illegal XML character references (e.g. &#x1F;)
+	data = sanitizeXMLBytes(data)
+
 	var root swtRoot
 	if err := xml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
@@ -111,12 +126,13 @@ func ParseSwtFile(path string) (*SwtFile, error) {
 			}
 			params := normalizeParams(action.Params)
 			entries = append(entries, SpawnEntry{
-				TriggerGUID: trigger.GUID,
-				TriggerName: trigger.Name,
-				ActionGUID:  action.GUID,
-				Disabled:    action.Disabled,
-				Params:      params,
-				Original:    params,
+				TriggerGUID:         trigger.GUID,
+				TriggerName:         trigger.Name,
+				OriginalTriggerName: trigger.Name,
+				ActionGUID:          action.GUID,
+				Disabled:            action.Disabled,
+				Params:              params,
+				Original:            params,
 			})
 		}
 	}
@@ -137,7 +153,34 @@ func SaveSwtFile(sf *SwtFile) error {
 
 	content := string(data)
 
+	for _, guid := range sf.DeletedActionGUIDs {
+		content, err = removeActionByGUID(content, guid)
+		if err != nil {
+			return fmt.Errorf("save %s guid=%s: %w", sf.Name, guid, err)
+		}
+	}
+
+	triggerNames := make(map[string]string)
 	for _, entry := range sf.Entries {
+		if entry.TriggerName != entry.OriginalTriggerName {
+			triggerNames[entry.TriggerGUID] = entry.TriggerName
+		}
+	}
+	for guid, name := range triggerNames {
+		content, err = replaceTriggerName(content, guid, name)
+		if err != nil {
+			return fmt.Errorf("save %s trigger=%s: %w", sf.Name, guid, err)
+		}
+	}
+
+	for _, entry := range sf.Entries {
+		if entry.Added {
+			content, err = insertActionBlock(content, entry)
+			if err != nil {
+				return fmt.Errorf("save %s add guid=%s: %w", sf.Name, entry.ActionGUID, err)
+			}
+			continue
+		}
 		if !entry.Modified() {
 			continue
 		}
@@ -197,12 +240,94 @@ func replaceActionParams(content, guid string, params [paramCount]string) (strin
 	return content[:actionStart] + sb.String() + content[actionEnd:], nil
 }
 
+func removeActionByGUID(content, guid string) (string, error) {
+	marker := fmt.Sprintf(`guid="%s"`, guid)
+	guidIdx := strings.Index(content, marker)
+	if guidIdx == -1 {
+		return content, fmt.Errorf("action guid=%s not found", guid)
+	}
+
+	actionStart := strings.LastIndex(content[:guidIdx], "<Action")
+	if actionStart == -1 {
+		return content, fmt.Errorf("action tag not found for guid=%s", guid)
+	}
+
+	actionEnd := strings.Index(content[actionStart:], "</Action>")
+	if actionEnd == -1 {
+		return content, fmt.Errorf("closing </Action> not found for guid=%s", guid)
+	}
+	actionEnd += actionStart + len("</Action>")
+
+	// Also eat trailing newline
+	if actionEnd < len(content) && content[actionEnd] == '\n' {
+		actionEnd++
+	}
+
+	return content[:actionStart] + content[actionEnd:], nil
+}
+
+func insertActionBlock(content string, entry SpawnEntry) (string, error) {
+	triggerMarker := fmt.Sprintf(`guid="%s"`, entry.TriggerGUID)
+	triggerIdx := strings.Index(content, triggerMarker)
+	if triggerIdx == -1 {
+		return content, fmt.Errorf("trigger guid=%s not found", entry.TriggerGUID)
+	}
+
+	closeTrigger := strings.Index(content[triggerIdx:], "</Trigger>")
+	if closeTrigger == -1 {
+		return content, fmt.Errorf("closing </Trigger> not found")
+	}
+	insertPos := triggerIdx + closeTrigger
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`<Action guid="%s" disabled="%s"><Name>%s</Name>`, entry.ActionGUID, entry.Disabled, spawnActionName))
+	sb.WriteString("\n")
+	for _, p := range entry.Params {
+		val := p
+		if val == "" {
+			val = "prm=?"
+		}
+		sb.WriteString("<Param>" + xmlEscape(val) + "</Param>\n")
+	}
+	sb.WriteString("</Action>\n")
+
+	return content[:insertPos] + sb.String() + content[insertPos:], nil
+}
+
+func replaceTriggerName(content, guid, name string) (string, error) {
+	marker := fmt.Sprintf(`guid="%s"`, guid)
+	idx := strings.Index(content, marker)
+	if idx == -1 {
+		return content, fmt.Errorf("trigger guid=%s not found", guid)
+	}
+
+	triggerStart := strings.LastIndex(content[:idx], "<Trigger")
+	if triggerStart == -1 {
+		return content, fmt.Errorf("trigger tag not found for guid=%s", guid)
+	}
+
+	nameStart := strings.Index(content[triggerStart:], "<Name>")
+	if nameStart == -1 {
+		return content, fmt.Errorf("trigger Name tag not found for guid=%s", guid)
+	}
+	nameStart += triggerStart + len("<Name>")
+	nameEnd := strings.Index(content[nameStart:], "</Name>")
+	if nameEnd == -1 {
+		return content, fmt.Errorf("trigger Name end not found for guid=%s", guid)
+	}
+	nameEnd += nameStart
+
+	return content[:nameStart] + xmlEscape(name) + content[nameEnd:], nil
+}
+
 // AddSpawnEntry adds a new spawn action to the first trigger in the file.
 func AddSpawnEntry(sf *SwtFile) (*SpawnEntry, error) {
 	data, err := os.ReadFile(sf.Path)
 	if err != nil {
 		return nil, err
 	}
+
+	data = sanitizeXMLBytes(data)
 
 	var root swtRoot
 	if err := xml.Unmarshal(data, &root); err != nil {
@@ -217,45 +342,41 @@ func AddSpawnEntry(sf *SwtFile) (*SpawnEntry, error) {
 	triggerGUID := root.Triggers[0].GUID
 	triggerName := root.Triggers[0].Name
 
-	// Insert new action XML before </Trigger> of first trigger
-	content := string(data)
-	triggerMarker := fmt.Sprintf(`guid="%s"`, triggerGUID)
-	triggerIdx := strings.Index(content, triggerMarker)
-	if triggerIdx == -1 {
-		return nil, fmt.Errorf("trigger guid=%s not found", triggerGUID)
-	}
-
-	// Find </Trigger> after this trigger
-	closeTrigger := strings.Index(content[triggerIdx:], "</Trigger>")
-	if closeTrigger == -1 {
-		return nil, fmt.Errorf("closing </Trigger> not found")
-	}
-	insertPos := triggerIdx + closeTrigger
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`<Action guid="%s" disabled="0"><Name>%s</Name>`, guid, spawnActionName))
-	sb.WriteString("\n")
-	for i := 0; i < paramCount; i++ {
-		sb.WriteString("<Param>prm=?</Param>\n")
-	}
-	sb.WriteString("</Action>\n")
-
-	newContent := content[:insertPos] + sb.String() + content[insertPos:]
-	if err := os.WriteFile(sf.Path, []byte(newContent), 0o644); err != nil {
-		return nil, err
-	}
-
 	var params [paramCount]string
 	entry := SpawnEntry{
-		TriggerGUID: triggerGUID,
-		TriggerName: triggerName,
-		ActionGUID:  guid,
-		Disabled:    "0",
-		Params:      params,
-		Original:    params,
+		TriggerGUID:         triggerGUID,
+		TriggerName:         triggerName,
+		OriginalTriggerName: triggerName,
+		ActionGUID:          guid,
+		Disabled:            "0",
+		Params:              params,
+		Original:            params,
+		Added:               true,
 	}
 	sf.Entries = append(sf.Entries, entry)
-	return &entry, nil
+	sf.dirty = true
+	return &sf.Entries[len(sf.Entries)-1], nil
+}
+
+func DuplicateSpawnEntry(sf *SwtFile, source SpawnEntry) (SpawnEntry, error) {
+	data, err := os.ReadFile(sf.Path)
+	if err != nil {
+		return SpawnEntry{}, err
+	}
+
+	data = sanitizeXMLBytes(data)
+
+	var root swtRoot
+	if err := xml.Unmarshal(data, &root); err != nil {
+		return SpawnEntry{}, err
+	}
+
+	guid := nextGUID(&root)
+	entry := source
+	entry.ActionGUID = guid
+	entry.Added = true
+	entry.OriginalTriggerName = entry.TriggerName
+	return entry, nil
 }
 
 // DeleteSpawnEntry removes an action from the file by GUID.
@@ -264,41 +385,15 @@ func DeleteSpawnEntry(sf *SwtFile, idx int) error {
 		return fmt.Errorf("index out of range")
 	}
 	entry := sf.Entries[idx]
-
-	data, err := os.ReadFile(sf.Path)
-	if err != nil {
-		return err
+	if entry.Added {
+		sf.Entries = append(sf.Entries[:idx], sf.Entries[idx+1:]...)
+		sf.dirty = true
+		return nil
 	}
 
-	content := string(data)
-	marker := fmt.Sprintf(`guid="%s"`, entry.ActionGUID)
-	guidIdx := strings.Index(content, marker)
-	if guidIdx == -1 {
-		return fmt.Errorf("action guid=%s not found", entry.ActionGUID)
-	}
-
-	actionStart := strings.LastIndex(content[:guidIdx], "<Action")
-	if actionStart == -1 {
-		return fmt.Errorf("action tag not found for guid=%s", entry.ActionGUID)
-	}
-
-	actionEnd := strings.Index(content[actionStart:], "</Action>")
-	if actionEnd == -1 {
-		return fmt.Errorf("closing </Action> not found")
-	}
-	actionEnd += actionStart + len("</Action>")
-
-	// Also eat trailing newline
-	if actionEnd < len(content) && content[actionEnd] == '\n' {
-		actionEnd++
-	}
-
-	newContent := content[:actionStart] + content[actionEnd:]
-	if err := os.WriteFile(sf.Path, []byte(newContent), 0o644); err != nil {
-		return err
-	}
-
+	sf.DeletedActionGUIDs = append(sf.DeletedActionGUIDs, entry.ActionGUID)
 	sf.Entries = append(sf.Entries[:idx], sf.Entries[idx+1:]...)
+	sf.dirty = true
 	return nil
 }
 
@@ -388,4 +483,47 @@ func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, `"`, "&quot;")
 	s = strings.ReplaceAll(s, "'", "&apos;")
 	return s
+}
+
+// sanitizeXML removes illegal XML character references (control chars U+0000-U+001F except tab/nl/cr).
+var illegalXMLCharRef = regexp.MustCompile(`&#x[0-1][0-9a-fA-F];|&#[0-2]?[0-9];`)
+
+func sanitizeXML(data []byte) []byte {
+	return illegalXMLCharRef.ReplaceAllFunc(data, func(match []byte) []byte {
+		s := strings.ToLower(string(match))
+		// Keep &#x9; (tab), &#xa; (newline), &#xd; (carriage return)
+		if s == "&#x9;" || s == "&#xa;" || s == "&#xd;" {
+			return match
+		}
+		return []byte("_")
+	})
+}
+
+func sanitizeXMLBytes(data []byte) []byte {
+	data = bytes.ToValidUTF8(data, []byte("_"))
+	return sanitizeXML(data)
+}
+
+// SortSwtFiles sorts file paths by mission number extracted from filename.
+var fileNumRe = regexp.MustCompile(`^(\d+)`)
+
+func SortSwtFiles(paths []string) {
+	sort.SliceStable(paths, func(i, j int) bool {
+		ni := filepath.Base(paths[i])
+		nj := filepath.Base(paths[j])
+		mi := fileNumRe.FindString(ni)
+		mj := fileNumRe.FindString(nj)
+		if mi != "" && mj != "" {
+			vi, _ := strconv.Atoi(mi)
+			vj, _ := strconv.Atoi(mj)
+			if vi != vj {
+				return vi < vj
+			}
+		} else if mi != "" {
+			return true
+		} else if mj != "" {
+			return false
+		}
+		return ni < nj
+	})
 }

@@ -19,10 +19,21 @@ const (
 	LevelEdit                 // edit fields of a spawn entry
 )
 
+const (
+	entryFilterUnit = iota
+	entryFilterOwner
+	entryFilterZone
+	entryFilterType
+)
+
+var entryFilterLabels = []string{"Unit", "Owner", "Zone", "Type"}
+
 type ProfileState struct {
-	label string
-	dir   string
-	files []string // full paths
+	label         string
+	dir           string
+	files         []string // full paths (current order)
+	filesOriginal []string // original order from disk
+	sorted        bool
 }
 
 type Model struct {
@@ -39,6 +50,14 @@ type Model struct {
 	// Entry browser
 	entryCursor int
 	entryScroll int
+
+	entryFilterActive  bool
+	entryFilterTyping  bool
+	entryFilterInput   string
+	entryFilterIndices []int
+	entryFilterCursor  int
+	entryFilterScroll  int
+	entryFilterMode    int
 
 	// Field editor
 	fieldCursor      int
@@ -90,6 +109,25 @@ func (m *Model) currentEntry() *SpawnEntry {
 	return &m.currentSwt.Entries[m.entryCursor]
 }
 
+func (m *Model) restoreCurrentEntry() {
+	entry := m.currentEntry()
+	if entry == nil {
+		return
+	}
+	if entry.Added {
+		idx := m.entryCursor
+		m.currentSwt.Entries = append(m.currentSwt.Entries[:idx], m.currentSwt.Entries[idx+1:]...)
+		if m.entryCursor >= len(m.currentSwt.Entries) && m.entryCursor > 0 {
+			m.entryCursor--
+		}
+		m.currentSwt.RecalcDirty()
+		return
+	}
+	entry.Params = entry.Original
+	entry.TriggerName = entry.OriginalTriggerName
+	m.currentSwt.RecalcDirty()
+}
+
 func (m *Model) visibleFiles() []int {
 	if m.filterActive {
 		return m.filterIndices
@@ -97,6 +135,20 @@ func (m *Model) visibleFiles() []int {
 	p := m.prof()
 	indices := make([]int, len(p.files))
 	for i := range p.files {
+		indices[i] = i
+	}
+	return indices
+}
+
+func (m *Model) visibleEntries() []int {
+	if m.entryFilterActive {
+		return m.entryFilterIndices
+	}
+	if m.currentSwt == nil {
+		return nil
+	}
+	indices := make([]int, len(m.currentSwt.Entries))
+	for i := range m.currentSwt.Entries {
 		indices[i] = i
 	}
 	return indices
@@ -115,6 +167,38 @@ func (m *Model) updateFileFilter() {
 	m.filterScroll = 0
 	if len(m.filterIndices) > 0 {
 		m.fileCursor = m.filterIndices[0]
+	}
+}
+
+func entryFilterParamIndex(mode int) int {
+	switch mode {
+	case entryFilterOwner:
+		return 6
+	case entryFilterZone:
+		return 5
+	case entryFilterType:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func (m *Model) updateEntryFilter() {
+	if m.currentSwt == nil {
+		return
+	}
+	paramIdx := entryFilterParamIndex(m.entryFilterMode)
+	m.entryFilterIndices = nil
+	for i, e := range m.currentSwt.Entries {
+		val := strings.ToLower(e.Params[paramIdx])
+		if m.entryFilterInput == "" || fuzzyMatch(val, m.entryFilterInput) {
+			m.entryFilterIndices = append(m.entryFilterIndices, i)
+		}
+	}
+	m.entryFilterCursor = 0
+	m.entryFilterScroll = 0
+	if len(m.entryFilterIndices) > 0 {
+		m.entryCursor = m.entryFilterIndices[0]
 	}
 }
 
@@ -139,6 +223,15 @@ func (m *Model) clearFilter() {
 	m.filterScroll = 0
 }
 
+func (m *Model) clearEntryFilter() {
+	m.entryFilterActive = false
+	m.entryFilterTyping = false
+	m.entryFilterInput = ""
+	m.entryFilterIndices = nil
+	m.entryFilterCursor = 0
+	m.entryFilterScroll = 0
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -154,7 +247,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.currentSwt != nil {
 				for i := range m.currentSwt.Entries {
 					m.currentSwt.Entries[i].Original = m.currentSwt.Entries[i].Params
+					m.currentSwt.Entries[i].OriginalTriggerName = m.currentSwt.Entries[i].TriggerName
+					m.currentSwt.Entries[i].Added = false
 				}
+				m.currentSwt.DeletedActionGUIDs = nil
 				m.currentSwt.dirty = false
 			}
 		}
@@ -198,6 +294,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateFilterTyping(msg)
 		}
 
+		if m.entryFilterActive && m.entryFilterTyping {
+			return m.updateEntryFilterTyping(msg)
+		}
+
 		if m.dropActive {
 			return m.updateDroplist(msg)
 		}
@@ -210,12 +310,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.saveCmd()
 		}
 
+		if key.Matches(msg, keys.Restore) && m.level != LevelFiles {
+			m.restoreCurrentEntry()
+			return m, nil
+		}
+
 		if key.Matches(msg, keys.Profile) && m.level == LevelFiles && len(m.profiles) > 1 {
 			m.activeProfile = (m.activeProfile + 1) % len(m.profiles)
 			m.fileCursor = 0
 			m.fileScroll = 0
 			m.currentSwt = nil
 			m.clearFilter()
+			m.clearEntryFilter()
 			return m, nil
 		}
 
@@ -227,6 +333,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.level == LevelEntries {
 				m.level = LevelFiles
 				m.currentSwt = nil
+				m.clearEntryFilter()
 				return m, nil
 			}
 			if m.currentSwt != nil && m.currentSwt.dirty {
@@ -242,6 +349,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.clearFilter()
 				return m, nil
 			}
+			if m.entryFilterActive && !m.entryFilterTyping {
+				m.clearEntryFilter()
+				return m, nil
+			}
 			if m.level == LevelEdit {
 				m.level = LevelEntries
 				return m, nil
@@ -249,6 +360,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.level == LevelEntries {
 				m.level = LevelFiles
 				m.currentSwt = nil
+				m.clearEntryFilter()
 				return m, nil
 			}
 			return m, nil
@@ -299,6 +411,7 @@ func (m Model) updateFiles(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.currentSwt = swt
 				m.entryCursor = 0
 				m.entryScroll = 0
+				m.clearEntryFilter()
 				m.level = LevelEntries
 			}
 		}
@@ -308,6 +421,40 @@ func (m Model) updateFiles(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterTyping = true
 		m.filterInput = ""
 		m.updateFileFilter()
+
+	case key.Matches(msg, keys.SortToggle):
+		p := m.prof()
+		selected := ""
+		if m.fileCursor >= 0 && m.fileCursor < len(p.files) {
+			selected = p.files[m.fileCursor]
+		}
+		if p.sorted {
+			p.files = append([]string(nil), p.filesOriginal...)
+			p.sorted = false
+		} else {
+			p.files = append([]string(nil), p.filesOriginal...)
+			SortSwtFiles(p.files)
+			p.sorted = true
+		}
+		if m.filterActive {
+			m.updateFileFilter()
+			if selected != "" {
+				for i, idx := range m.filterIndices {
+					if p.files[idx] == selected {
+						m.filterCursor = i
+						m.fileCursor = idx
+						break
+					}
+				}
+			}
+		} else if selected != "" {
+			for i, path := range p.files {
+				if path == selected {
+					m.fileCursor = i
+					break
+				}
+			}
+		}
 	}
 	return m, nil
 }
@@ -318,11 +465,21 @@ func (m Model) updateEntries(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case key.Matches(msg, keys.Up):
-		if m.entryCursor > 0 {
+		if m.entryFilterActive {
+			if m.entryFilterCursor > 0 {
+				m.entryFilterCursor--
+				m.entryCursor = m.entryFilterIndices[m.entryFilterCursor]
+			}
+		} else if m.entryCursor > 0 {
 			m.entryCursor--
 		}
 	case key.Matches(msg, keys.Down):
-		if m.entryCursor < len(m.currentSwt.Entries)-1 {
+		if m.entryFilterActive {
+			if m.entryFilterCursor < len(m.entryFilterIndices)-1 {
+				m.entryFilterCursor++
+				m.entryCursor = m.entryFilterIndices[m.entryFilterCursor]
+			}
+		} else if m.entryCursor < len(m.currentSwt.Entries)-1 {
 			m.entryCursor++
 		}
 	case key.Matches(msg, keys.Edit), key.Matches(msg, keys.Enter):
@@ -340,12 +497,34 @@ func (m Model) updateEntries(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.level = LevelEdit
 			m.fieldCursor = 0
 		}
+	case key.Matches(msg, keys.Duplicate):
+		if len(m.currentSwt.Entries) > 0 {
+			source := m.currentSwt.Entries[m.entryCursor]
+			dup, err := DuplicateSpawnEntry(m.currentSwt, source)
+			if err != nil {
+				m.statusMsg = fmt.Sprintf("Error: %v", err)
+				return m, nil
+			}
+			insertAt := m.entryCursor + 1
+			if insertAt > len(m.currentSwt.Entries) {
+				insertAt = len(m.currentSwt.Entries)
+			}
+			m.currentSwt.Entries = append(m.currentSwt.Entries[:insertAt], append([]SpawnEntry{dup}, m.currentSwt.Entries[insertAt:]...)...)
+			m.entryCursor = insertAt
+			m.currentSwt.RecalcDirty()
+		}
 	case key.Matches(msg, keys.Delete):
 		if len(m.currentSwt.Entries) > 0 {
 			e := m.currentEntry()
 			m.confirmDelete = true
 			m.statusMsg = fmt.Sprintf("Delete %s [%s]? Y/N", e.Unit(), e.EntityType())
 		}
+	case key.Matches(msg, keys.Find):
+		m.entryFilterActive = true
+		m.entryFilterTyping = true
+		m.entryFilterInput = ""
+		m.entryFilterMode = entryFilterUnit
+		m.updateEntryFilter()
 	}
 	return m, nil
 }
@@ -364,20 +543,16 @@ func (m Model) updateEditNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.fieldCursor < paramCount { // 12 params + trigger
 			m.fieldCursor++
 		}
-	case key.Matches(msg, keys.Space):
-		if m.fieldCursor == 2 { // Type toggle
-			current := entry.Params[2]
-			for i, t := range entityTypes {
-				if t == current {
-					entry.Params[2] = entityTypes[(i+1)%len(entityTypes)]
-					m.currentSwt.RecalcDirty()
-					return m, nil
-				}
-			}
-			entry.Params[2] = entityTypes[0]
-			m.currentSwt.RecalcDirty()
-		}
 	case key.Matches(msg, keys.Enter):
+		if m.fieldCursor == 2 { // Type droplist
+			m.dropItems = CollectCandidates(m.currentSwt.Entries, 2, entityTypes...)
+			if len(m.dropItems) > 0 {
+				m.dropActive = true
+				m.dropCursor = 0
+				m.dropScroll = 0
+				return m, nil
+			}
+		}
 		if m.fieldCursor == 5 { // Zone droplist
 			m.dropItems = CollectCandidates(m.currentSwt.Entries, 5)
 			if len(m.dropItems) > 0 {
@@ -488,6 +663,33 @@ func (m Model) updateFilterTyping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateEntryFilterTyping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Escape):
+		m.clearEntryFilter()
+
+	case key.Matches(msg, keys.Enter):
+		if len(m.entryFilterIndices) > 0 {
+			m.entryFilterTyping = false
+		}
+
+	case key.Matches(msg, keys.Tab):
+		m.entryFilterMode = (m.entryFilterMode + 1) % len(entryFilterLabels)
+		m.updateEntryFilter()
+
+	case msg.Type == tea.KeyBackspace:
+		if len(m.entryFilterInput) > 0 {
+			m.entryFilterInput = m.entryFilterInput[:len(m.entryFilterInput)-1]
+			m.updateEntryFilter()
+		}
+
+	case msg.Type == tea.KeyRunes:
+		m.entryFilterInput += string(msg.Runes)
+		m.updateEntryFilter()
+	}
+	return m, nil
+}
+
 func (m Model) saveCmd() tea.Cmd {
 	swt := m.currentSwt
 	return func() tea.Msg {
@@ -501,30 +703,69 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	contentWidth := m.width - 4
-	contentHeight := m.height - 6
+	title := appTitleStyle.Render("Spawn Editor")
+
+	contentHeight := m.height - 7
 	if contentHeight < 5 {
 		contentHeight = 5
 	}
 
-	title := appTitleStyle.Render("Spawn Editor")
-
-	var panel string
-	switch m.level {
-	case LevelFiles:
-		panel = m.renderFiles(contentWidth, contentHeight)
-	case LevelEntries:
-		panel = m.renderEntries(contentWidth, contentHeight)
-	case LevelEdit:
-		panel = m.renderEditFields(contentWidth, contentHeight)
+	if m.level == LevelFiles {
+		contentWidth := m.width - 4
+		panel := m.renderFiles(contentWidth, contentHeight)
+		rendered := activePanelStyle.Width(contentWidth).Height(contentHeight).Render(panel)
+		status := m.renderStatus(lipgloss.Width(rendered))
+		return lipgloss.JoinVertical(lipgloss.Left, title, rendered, status)
 	}
 
-	panelStyle := activePanelStyle.Width(contentWidth).Height(contentHeight)
-	rendered := panelStyle.Render(panel)
+	totalWidth := m.width
+	leftWidth := (totalWidth - 9) * 3 / 5
+	rightWidth := totalWidth - 9 - leftWidth
+	if leftWidth < 30 {
+		leftWidth = 30
+	}
+	if rightWidth < 25 {
+		rightWidth = 25
+	}
+	if m.currentSwt != nil {
+		maxPanelWidth := totalWidth - 9 - 25
+		desiredLeft := desiredEntriesWidth(m.currentSwt.Entries, m.currentSwt.Name, len(m.currentSwt.Entries), 30, maxPanelWidth)
+		if desiredLeft < leftWidth {
+			leftWidth = desiredLeft
+			rightWidth = totalWidth - 9 - leftWidth
+			if rightWidth < 25 {
+				rightWidth = 25
+				leftWidth = totalWidth - 9 - rightWidth
+			}
+		}
+	}
 
-	status := m.renderStatus(lipgloss.Width(rendered))
+	leftPanel := m.renderEntries(leftWidth, contentHeight)
+	var rightPanel string
+	if m.level == LevelEdit {
+		rightPanel = m.renderEditFields(rightWidth, contentHeight)
+	} else {
+		rightPanel = m.renderEntryPreview(rightWidth, contentHeight)
+	}
+	leftPanel = padToHeight(leftPanel, contentHeight)
+	rightPanel = padToHeight(rightPanel, contentHeight)
 
-	return lipgloss.JoinVertical(lipgloss.Left, title, rendered, status)
+	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight).PaddingLeft(1).PaddingRight(0)
+	rightStyle := panelStyle.Width(rightWidth).Height(contentHeight)
+	if m.level == LevelEdit || m.dropActive || m.fieldEditing {
+		rightStyle = activePanelStyle.Width(rightWidth).Height(contentHeight)
+	} else {
+		leftStyle = activePanelStyle.Width(leftWidth).Height(contentHeight)
+	}
+
+	panels := lipgloss.JoinHorizontal(lipgloss.Top,
+		leftStyle.Render(leftPanel),
+		" ",
+		rightStyle.Render(rightPanel),
+	)
+
+	status := m.renderStatus(lipgloss.Width(panels))
+	return lipgloss.JoinVertical(lipgloss.Left, title, panels, status)
 }
 
 func (m Model) renderFiles(width, height int) string {
@@ -609,48 +850,89 @@ func (m Model) renderEntries(width, height int) string {
 		return "No file loaded"
 	}
 
-	title := m.currentSwt.Name
-	if m.currentSwt.dirty {
-		title += dirtyStyle.Render(" [modified]")
+	if m.entryFilterActive {
+		modeLabel := entryFilterLabels[m.entryFilterMode]
+		header := titleStyle.Render("Find") + helpSepStyle.Render(" | ") + titleStyle.Render(modeLabel)
+		count := fmt.Sprintf("%d", len(m.entryFilterIndices)) + helpSepStyle.Render("/") + fmt.Sprintf("%d", len(m.currentSwt.Entries))
+		pad := textWidth - lipgloss.Width(header) - lipgloss.Width(count)
+		if pad < 1 {
+			pad = 1
+		}
+		sb.WriteString(header + strings.Repeat(" ", pad) + count)
+		sb.WriteString("\n")
+		if m.entryFilterTyping {
+			sb.WriteString(searchInputStyle.Render(m.entryFilterInput + "█"))
+		} else {
+			sb.WriteString(checkedStyle.Render(m.entryFilterInput + " ✓"))
+		}
+		sb.WriteString("\n")
+	} else {
+		title := m.currentSwt.Name
+		if m.currentSwt.dirty {
+			title += dirtyStyle.Render(" [modified]")
+		}
+		count := fmt.Sprintf("%d", len(m.currentSwt.Entries))
+		pad := textWidth - lipgloss.Width(titleStyle.Render(title)) - lipgloss.Width(titleStyle.Render(count))
+		if pad < 1 {
+			pad = 1
+		}
+		sb.WriteString(titleStyle.Render(title) + strings.Repeat(" ", pad) + titleStyle.Render(count))
+		sb.WriteString("\n\n")
 	}
-	count := fmt.Sprintf("%d", len(m.currentSwt.Entries))
-	pad := textWidth - lipgloss.Width(titleStyle.Render(title)) - lipgloss.Width(titleStyle.Render(count))
-	if pad < 1 {
-		pad = 1
-	}
-	sb.WriteString(titleStyle.Render(title) + strings.Repeat(" ", pad) + titleStyle.Render(count))
-	sb.WriteString("\n\n")
 
 	entries := m.currentSwt.Entries
-	detailLines := 0
-	if len(entries) > 0 {
-		detailLines = 3
-	}
-	visibleHeight := height - 3 - detailLines
+	headerLines := 2
+	tableHeaderLines := 2
+	visibleHeight := height - headerLines - tableHeaderLines
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
 
-	if m.entryCursor < m.entryScroll {
-		m.entryScroll = m.entryCursor
+	vis := m.visibleEntries()
+	cursor := m.entryCursor
+	scroll := &m.entryScroll
+	if m.entryFilterActive {
+		cursor = m.entryFilterCursor
+		scroll = &m.entryFilterScroll
 	}
-	if m.entryCursor >= m.entryScroll+visibleHeight {
-		m.entryScroll = m.entryCursor - visibleHeight + 1
+	if cursor < *scroll {
+		*scroll = cursor
+	}
+	if cursor >= *scroll+visibleHeight {
+		*scroll = cursor - visibleHeight + 1
 	}
 
-	for i := m.entryScroll; i < len(entries) && i < m.entryScroll+visibleHeight; i++ {
-		e := entries[i]
-		display := e.Unit()
-		if display == "" {
-			display = "(empty)"
+	rowWidth := textWidth - 2
+	if rowWidth < 10 {
+		rowWidth = 10
+	}
+	sep := " | "
+	sepWidth := 3
+
+	unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth := entryColumnWidths(entries, rowWidth, sepWidth)
+
+	headerRow := formatHeaderRow(unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth)
+	sb.WriteString("  " + headerRow + "\n")
+
+	lineRow := formatHeaderRuleRow(unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth)
+	sb.WriteString("  " + lineRow + "\n")
+
+	for vi := *scroll; vi < len(vis) && vi < *scroll+visibleHeight; vi++ {
+		idx := vis[vi]
+		e := entries[idx]
+		unit := e.Unit()
+		if unit == "" {
+			unit = "(empty)"
 		}
-		eType := e.EntityType()
-		if eType != "" {
-			display += " [" + eType + "]"
+		preset := e.Params[4]
+		owner := e.Owner()
+		zone := e.Zone()
+		typeLabel := ""
+		if e.EntityType() != "" {
+			typeLabel = "[" + e.EntityType() + "]"
 		}
-		if len(display) > textWidth-2 {
-			display = display[:textWidth-5] + "..."
-		}
+
+		rowPlain := formatEntryRow(unit, preset, owner, zone, typeLabel, unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth, sep)
 
 		modified := e.Modified()
 		gutter := " "
@@ -658,37 +940,214 @@ func (m Model) renderEntries(width, height int) string {
 			gutter = activeTabStyle.Render("·")
 		}
 
-		if i == m.entryCursor {
-			sb.WriteString(selectorPrefix.Render("▶ ") + reorderHighlight.Render(display) + "\n")
+		isSelected := false
+		if m.entryFilterActive {
+			isSelected = vi == m.entryFilterCursor
 		} else {
-			sb.WriteString(gutter + " " + display + "\n")
+			isSelected = idx == m.entryCursor
 		}
-	}
-
-	if len(entries) > 0 && m.entryCursor < len(entries) {
-		e := entries[m.entryCursor]
-		rendered := len(entries)
-		if rendered > visibleHeight {
-			rendered = visibleHeight
-		}
-		showing := rendered
-		if m.entryScroll > 0 {
-			showing = visibleHeight
-		}
-		remaining := visibleHeight - showing
-		for i := 0; i < remaining; i++ {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-		if e.Zone() != "" {
-			sb.WriteString(commentStyle.Render("  Zone: " + e.Zone()) + "\n")
-		}
-		if e.Owner() != "" {
-			sb.WriteString(commentStyle.Render("  Owner: " + e.Owner()))
+		if isSelected {
+			sb.WriteString(selectorPrefix.Render("▶ ") + reorderHighlight.Render(rowPlain) + "\n")
+		} else {
+			row := styleRowSeparators(rowPlain)
+			sb.WriteString(gutter + " " + row + "\n")
 		}
 	}
 
 	return sb.String()
+}
+
+func formatEntryRow(unit, preset, owner, zone, typ string, unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth int, sep string) string {
+	row := fmt.Sprintf(
+		"%-*s%s%-*s%s%-*s%s%-*s%s%-*s",
+		unitWidth, clampText(unit, unitWidth),
+		sep,
+		presetWidth, clampText(preset, presetWidth),
+		sep,
+		ownerWidth, clampText(owner, ownerWidth),
+		sep,
+		zoneWidth, clampText(zone, zoneWidth),
+		sep,
+		typeWidth, clampText(typ, typeWidth),
+	)
+	return strings.TrimRight(row, " ")
+}
+
+func formatHeaderRow(unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth int) string {
+	sep := " " + headerSepStyle.Render("|") + " "
+	return headerCell("Unit", unitWidth) +
+		sep + headerCell("Preset", presetWidth) +
+		sep + headerCell("Owner", ownerWidth) +
+		sep + headerCell("Zone", zoneWidth) +
+		sep + headerCell("Type", typeWidth)
+}
+
+func formatHeaderRuleRow(unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth int) string {
+	sep := " " + headerSepStyle.Render("|") + " "
+	return headerRuleCell(unitWidth) +
+		sep + headerRuleCell(presetWidth) +
+		sep + headerRuleCell(ownerWidth) +
+		sep + headerRuleCell(zoneWidth) +
+		sep + headerRuleCell(typeWidth)
+}
+
+func headerCell(label string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	text := fmt.Sprintf("%-*s", width, clampText(label, width))
+	return headerTextStyle.Render(text)
+}
+
+func headerRuleCell(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return headerTextStyle.Render(strings.Repeat("-", width))
+}
+
+func entryColumnWidths(entries []SpawnEntry, rowWidth int, sepWidth int) (int, int, int, int, int) {
+	unitWidth := len("Unit")
+	presetWidth := len("Preset")
+	ownerWidth := len("Owner")
+	zoneWidth := len("Zone")
+	typeWidth := len("Type")
+
+	for _, e := range entries {
+		if l := len(e.Unit()); l > unitWidth {
+			unitWidth = l
+		}
+		if l := len(e.Params[4]); l > presetWidth {
+			presetWidth = l
+		}
+		if l := len(e.Owner()); l > ownerWidth {
+			ownerWidth = l
+		}
+		if l := len(e.Zone()); l > zoneWidth {
+			zoneWidth = l
+		}
+		if e.EntityType() != "" {
+			if l := len("[" + e.EntityType() + "]"); l > typeWidth {
+				typeWidth = l
+			}
+		}
+	}
+
+	if rowWidth < 10 {
+		rowWidth = 10
+	}
+	maxTotal := rowWidth - sepWidth*4
+	if maxTotal < 5 {
+		maxTotal = 5
+	}
+
+	widths := []int{unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth}
+	minWidth := 4
+	for totalWidths(widths) > maxTotal {
+		idx := maxWidthIndex(widths, minWidth)
+		if idx == -1 {
+			break
+		}
+		widths[idx]--
+	}
+
+	return widths[0], widths[1], widths[2], widths[3], widths[4]
+}
+
+func totalWidths(widths []int) int {
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	return total
+}
+
+func maxWidthIndex(widths []int, minWidth int) int {
+	maxIdx := -1
+	maxVal := 0
+	for i, w := range widths {
+		if w > maxVal && w > minWidth {
+			maxVal = w
+			maxIdx = i
+		}
+	}
+	return maxIdx
+}
+
+func styleRowSeparators(row string) string {
+	return strings.ReplaceAll(row, " | ", " "+headerSepStyle.Render("|")+" ")
+}
+
+func desiredEntriesWidth(entries []SpawnEntry, title string, count int, minWidth int, maxWidth int) int {
+	if minWidth < 1 {
+		minWidth = 1
+	}
+	if maxWidth < minWidth {
+		maxWidth = minWidth
+	}
+
+	sepWidth := 3
+	unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth := entryColumnWidths(entries, maxWidth-4, sepWidth)
+	rowWidth := unitWidth + presetWidth + ownerWidth + zoneWidth + typeWidth + sepWidth*4
+
+	rowTextWidth := rowWidth + 2
+	countLabel := fmt.Sprintf("%d", count)
+	minHeaderText := len(title) + len(countLabel) + 1
+	if rowTextWidth < minHeaderText {
+		rowTextWidth = minHeaderText
+	}
+
+	width := rowTextWidth + 2
+	if width < minWidth {
+		return minWidth
+	}
+	if width > maxWidth {
+		return maxWidth
+	}
+	return width
+}
+
+func clampText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if len(s) > width {
+		if width <= 3 {
+			return s[:width]
+		}
+		return s[:width-3] + "..."
+	}
+	return s
+}
+
+func (m Model) renderEntryPreview(width, height int) string {
+	var sb strings.Builder
+	entry := m.currentEntry()
+	if entry == nil {
+		return "No entry selected"
+	}
+
+	unitName := entry.Unit()
+	if unitName == "" {
+		unitName = "(empty)"
+	}
+	sb.WriteString(titleStyle.Render("Spawn: " + unitName))
+	sb.WriteString("\n\n\n\n")
+
+	for i := 0; i < paramCount; i++ {
+		label := fieldLabels[i]
+		value := entry.Params[i]
+		if value == "" {
+			value = commentStyle.Render("—")
+		}
+		sb.WriteString(commentStyle.Render(fmt.Sprintf("%-12s", label)) + " " + value + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + entry.TriggerName)
+
+	_ = width
+	return padToHeight(sb.String(), height)
 }
 
 func (m Model) renderEditFields(width, height int) string {
@@ -704,7 +1163,7 @@ func (m Model) renderEditFields(width, height int) string {
 		unitName = "(new)"
 	}
 	sb.WriteString(titleStyle.Render("Edit: " + unitName))
-	sb.WriteString("\n\n")
+	sb.WriteString("\n\n\n\n")
 
 	for i := 0; i < paramCount; i++ {
 		label := fieldLabels[i]
@@ -719,16 +1178,7 @@ func (m Model) renderEditFields(width, height int) string {
 
 		if m.dropActive && m.fieldCursor == i {
 			sb.WriteString(selectorPrefix.Render("▶ ") + commentStyle.Render(fmt.Sprintf("%-12s", label)) + "\n")
-			maxShow := 5
-			if maxShow > len(m.dropItems) {
-				maxShow = len(m.dropItems)
-			}
-			scroll := 0
-			if m.dropCursor >= maxShow {
-				scroll = m.dropCursor - maxShow + 1
-			}
-			for di := scroll; di < len(m.dropItems) && di < scroll+maxShow; di++ {
-				item := m.dropItems[di]
+			for di, item := range m.dropItems {
 				if di == m.dropCursor {
 					sb.WriteString("    " + selectorPrefix.Render("▶ ") + reorderHighlight.Render(item) + "\n")
 				} else {
@@ -766,7 +1216,19 @@ func (m Model) renderEditFields(width, height int) string {
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + triggerVal + "\n")
 	}
 
-	return sb.String()
+	_ = width
+	return padToHeight(sb.String(), height)
+}
+
+func padToHeight(s string, height int) string {
+	if height <= 0 {
+		return s
+	}
+	lines := lipgloss.Height(s)
+	if lines >= height {
+		return s
+	}
+	return s + strings.Repeat("\n", height-lines)
 }
 
 func (m Model) renderStatus(totalWidth int) string {
@@ -776,6 +1238,10 @@ func (m Model) renderStatus(totalWidth int) string {
 		left = reorderHighlight.Render(m.statusMsg)
 	} else if m.filterActive && m.filterTyping {
 		left = helpLine(h("type", "filter"), h("Enter", "apply"), h("Esc", "cancel"))
+	} else if m.entryFilterActive && m.entryFilterTyping {
+		left = helpLine(h("type", "filter"), h("Enter", "apply"), h("Tab", "mode"), h("Esc", "cancel"))
+	} else if m.entryFilterActive {
+		left = helpLine(h("j/k", "navigate"), h("Enter", "edit"), h("Esc", "clear filter"))
 	} else if m.fieldEditing {
 		left = helpLine(h("type", "edit"), h("Enter", "confirm"), h("Esc", "cancel"))
 	} else if m.dropActive {
@@ -784,15 +1250,15 @@ func (m Model) renderStatus(totalWidth int) string {
 		switch m.level {
 		case LevelFiles:
 			if m.filterActive {
-				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("Esc", "clear filter"))
+				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("r", "sort"), h("Esc", "clear filter"))
 			} else {
 				hp := activeTabStyle.Render("p") + helpDescStyle.Render(": profile")
-				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("f", "find"), hp, h("q", "quit"))
+				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("f", "find"), h("r", "sort"), hp, h("q", "quit"))
 			}
 		case LevelEntries:
-			left = helpLine(h("j/k", "navigate"), h("e", "edit"), h("a", "add"), h("d", "delete"), h("s", "save"), h("Esc", "back"))
+			left = helpLine(h("j/k", "navigate"), h("e", "edit"), h("a", "add"), h("c", "copy"), h("f", "find"), h("R", "restore"), h("d", "delete"), h("s", "save"), h("Esc", "back"))
 		case LevelEdit:
-			left = helpLine(h("j/k", "navigate"), h("Enter", "edit field"), h("Space", "toggle type"), h("s", "save"), h("Esc", "back"))
+			left = helpLine(h("j/k", "navigate"), h("Enter", "edit field"), h("R", "restore"), h("s", "save"), h("Esc", "back"))
 		}
 	}
 
