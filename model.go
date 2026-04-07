@@ -569,6 +569,15 @@ func (m Model) updateEditNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dropScroll = 0
 			return m, nil
 		}
+		if m.fieldCursor == paramCount { // Trigger droplist
+			m.dropItems = CollectTriggerNames(m.currentSwt.Entries)
+			if len(m.dropItems) > 0 {
+				m.dropActive = true
+				m.dropCursor = 0
+				m.dropScroll = 0
+				return m, nil
+			}
+		}
 		// Text input for other fields
 		idx := m.fieldCursor
 		if idx < paramCount {
@@ -633,8 +642,12 @@ func (m Model) updateDroplist(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Enter):
 		if m.dropCursor < len(m.dropItems) {
 			entry := m.currentEntry()
-			if entry != nil && m.fieldCursor < paramCount {
-				entry.Params[m.fieldCursor] = m.dropItems[m.dropCursor]
+			if entry != nil {
+				if m.fieldCursor < paramCount {
+					entry.Params[m.fieldCursor] = m.dropItems[m.dropCursor]
+				} else {
+					entry.TriggerName = m.dropItems[m.dropCursor]
+				}
 				m.currentSwt.RecalcDirty()
 			}
 		}
@@ -1237,6 +1250,15 @@ func (m Model) renderEditFields(width, height int) string {
 		before := m.fieldInput[:m.fieldInputCursor]
 		after := m.fieldInput[m.fieldInputCursor:]
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + searchInputStyle.Render(before+"█"+after) + "\n")
+	} else if m.dropActive && m.fieldCursor == paramCount {
+		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + "\n")
+		for di, item := range m.dropItems {
+			if di == m.dropCursor {
+				sb.WriteString("    " + selectorPrefix.Render("▶ ") + reorderHighlight.Render(item) + "\n")
+			} else {
+				sb.WriteString("      " + item + "\n")
+			}
+		}
 	} else {
 		triggerVal := entry.TriggerName
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + triggerVal + "\n")

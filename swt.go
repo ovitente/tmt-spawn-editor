@@ -432,6 +432,19 @@ func CollectCandidates(entries []SpawnEntry, paramIdx int, always ...string) []s
 	return result
 }
 
+// CollectTriggerNames extracts unique trigger names from entries.
+func CollectTriggerNames(entries []SpawnEntry) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, e := range entries {
+		if e.TriggerName != "" && !seen[e.TriggerName] {
+			seen[e.TriggerName] = true
+			result = append(result, e.TriggerName)
+		}
+	}
+	return result
+}
+
 func normalizeParams(raw []string) [paramCount]string {
 	var result [paramCount]string
 	for i := 0; i < paramCount; i++ {
