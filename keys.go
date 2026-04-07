@@ -18,6 +18,7 @@ type keyMap struct {
 	SortToggle key.Binding
 	Tab        key.Binding
 	Profile    key.Binding
+	Mod        key.Binding
 	Quit       key.Binding
 }
 
@@ -66,6 +67,9 @@ var keys = keyMap{
 	),
 	Profile: key.NewBinding(
 		key.WithKeys("p"),
+	),
+	Mod: key.NewBinding(
+		key.WithKeys("m"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),

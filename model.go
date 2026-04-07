@@ -37,6 +37,15 @@ type ProfileState struct {
 }
 
 type Model struct {
+	modsDir        string
+	currentMod     string
+	currentModName string
+
+	// Mod picker modal
+	modSelectActive bool
+	modSelectItems  []ModEntry
+	modSelectCursor int
+
 	profiles      []ProfileState
 	activeProfile int
 
@@ -89,10 +98,13 @@ type Model struct {
 
 type saveResultMsg struct{ err error }
 
-func NewModel(profiles []ProfileState) Model {
+func NewModel(profiles []ProfileState, modsDir, currentMod, currentModName string) Model {
 	return Model{
-		profiles: profiles,
-		level:    LevelFiles,
+		profiles:       profiles,
+		modsDir:        modsDir,
+		currentMod:     currentMod,
+		currentModName: currentModName,
+		level:          LevelFiles,
 	}
 }
 
@@ -298,6 +310,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEntryFilterTyping(msg)
 		}
 
+		if m.modSelectActive {
+			return m.updateModSelect(msg)
+		}
+
 		if m.dropActive {
 			return m.updateDroplist(msg)
 		}
@@ -322,6 +338,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentSwt = nil
 			m.clearFilter()
 			m.clearEntryFilter()
+			return m, nil
+		}
+
+		if key.Matches(msg, keys.Mod) && m.level == LevelFiles && !m.filterActive && !m.entryFilterActive {
+			m.modSelectItems = ScanMods(m.modsDir)
+			m.modSelectCursor = 0
+			for i, it := range m.modSelectItems {
+				if it.Path == m.currentMod {
+					m.modSelectCursor = i
+					break
+				}
+			}
+			m.modSelectActive = true
 			return m, nil
 		}
 
@@ -637,6 +666,48 @@ func (m Model) updateFieldInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateModSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Escape):
+		m.modSelectActive = false
+	case key.Matches(msg, keys.Up):
+		if m.modSelectCursor > 0 {
+			m.modSelectCursor--
+		}
+	case key.Matches(msg, keys.Down):
+		if m.modSelectCursor < len(m.modSelectItems)-1 {
+			m.modSelectCursor++
+		}
+	case key.Matches(msg, keys.Enter):
+		if m.modSelectCursor < 0 || m.modSelectCursor >= len(m.modSelectItems) {
+			m.modSelectActive = false
+			return m, nil
+		}
+		sel := m.modSelectItems[m.modSelectCursor]
+		if sel.Path == m.currentMod {
+			m.modSelectActive = false
+			return m, nil
+		}
+		newProfs := LoadProfiles(sel.Path)
+		if len(newProfs) == 0 {
+			m.statusMsg = fmt.Sprintf("No spawns in %s", sel.Name)
+			m.modSelectActive = false
+			return m, nil
+		}
+		m.profiles = newProfs
+		m.activeProfile = 0
+		m.currentMod = sel.Path
+		m.currentModName = sel.Name
+		m.fileCursor = 0
+		m.fileScroll = 0
+		m.currentSwt = nil
+		m.clearFilter()
+		m.clearEntryFilter()
+		m.modSelectActive = false
+	}
+	return m, nil
+}
+
 func (m Model) updateDroplist(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Escape):
@@ -726,7 +797,11 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	title := appTitleStyle.Render("Spawn Editor")
+	if m.modSelectActive {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.renderModSelect())
+	}
+
+	title := m.renderTitleBar()
 
 	contentHeight := m.height - 6
 	if contentHeight < 5 {
@@ -1315,6 +1390,93 @@ func (m Model) renderEditFields(width, height int) string {
 	return sb.String()
 }
 
+func (m Model) renderTitleBar() string {
+	left := appTitleStyle.Render("Spawn Editor")
+	if m.currentModName == "" {
+		return left
+	}
+	right := activeTabStyle.Render(m.currentModName)
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 1
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func (m Model) renderModSelect() string {
+	boxWidth := 60
+	if boxWidth > m.width-8 {
+		boxWidth = m.width - 8
+	}
+	if boxWidth < 30 {
+		boxWidth = 30
+	}
+	textWidth := boxWidth - 4
+
+	header := titleStyle.Render("Select mod") + helpSepStyle.Render(" | ") +
+		titleStyle.Render(fmt.Sprintf("%d", len(m.modSelectItems)))
+
+	maxVisible := m.height - 10
+	if maxVisible < 3 {
+		maxVisible = 3
+	}
+	if maxVisible > len(m.modSelectItems) {
+		maxVisible = len(m.modSelectItems)
+	}
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+
+	scroll := 0
+	if m.modSelectCursor >= maxVisible {
+		scroll = m.modSelectCursor - maxVisible + 1
+	}
+	if scroll > len(m.modSelectItems)-maxVisible {
+		scroll = len(m.modSelectItems) - maxVisible
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	end := scroll + maxVisible
+	if end > len(m.modSelectItems) {
+		end = len(m.modSelectItems)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(header + "\n\n")
+	if scroll > 0 {
+		sb.WriteString("  " + commentStyle.Render("↑ more") + "\n")
+	} else {
+		sb.WriteString("\n")
+	}
+	for i := scroll; i < end; i++ {
+		item := m.modSelectItems[i]
+		label := item.Name
+		if item.Path == m.currentMod {
+			label += commentStyle.Render(" (current)")
+		}
+		line := clampText(item.Name, textWidth-4)
+		if item.Path == m.currentMod {
+			line = clampText(item.Name+" (current)", textWidth-4)
+		}
+		_ = label
+		if i == m.modSelectCursor {
+			sb.WriteString(selectorPrefix.Render("▶ ") + reorderHighlight.Render(line) + "\n")
+		} else {
+			sb.WriteString("  " + line + "\n")
+		}
+	}
+	if end < len(m.modSelectItems) {
+		sb.WriteString("  " + commentStyle.Render("↓ more") + "\n")
+	} else {
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(helpLine(h("j/k", "navigate"), h("Enter", "select"), h("Esc", "cancel")))
+
+	return activePanelStyle.Width(boxWidth).Render(sb.String())
+}
+
 func (m Model) renderStatus(totalWidth int) string {
 	var left string
 
@@ -1337,7 +1499,7 @@ func (m Model) renderStatus(totalWidth int) string {
 				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("r", "sort"), h("Esc", "clear filter"))
 			} else {
 				hp := activeTabStyle.Render("p") + helpDescStyle.Render(": profile")
-				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("f", "find"), h("r", "sort"), hp, h("q", "quit"))
+				left = helpLine(h("j/k", "navigate"), h("Enter", "open"), h("f", "find"), h("r", "sort"), hp, h("m", "mod"), h("q", "quit"))
 			}
 		case LevelEntries:
 			left = helpLine(h("j/k", "navigate"), h("e", "edit"), h("a", "add"), h("c", "copy"), h("f", "find"), h("R", "restore"), h("d", "delete"), h("s", "save"), h("Esc", "back"))
