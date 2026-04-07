@@ -36,11 +36,6 @@ type ProfileState struct {
 	sorted        bool
 }
 
-const (
-	leftPanelPadLeft  = 1
-	leftPanelPadRight = 0
-)
-
 type Model struct {
 	profiles      []ProfileState
 	activeProfile int
@@ -710,7 +705,7 @@ func (m Model) View() string {
 
 	title := appTitleStyle.Render("Spawn Editor")
 
-	contentHeight := m.height - 7
+	contentHeight := m.height - 6
 	if contentHeight < 5 {
 		contentHeight = 5
 	}
@@ -752,10 +747,8 @@ func (m Model) View() string {
 	} else {
 		rightPanel = m.renderEntryPreview(rightWidth, contentHeight)
 	}
-	leftPanel = padToHeight(leftPanel, contentHeight)
-	rightPanel = padToHeight(rightPanel, contentHeight)
 
-	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight).PaddingLeft(leftPanelPadLeft).PaddingRight(leftPanelPadRight)
+	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight)
 	rightStyle := panelStyle.Width(rightWidth).Height(contentHeight)
 	if m.level == LevelEdit || m.dropActive || m.fieldEditing {
 		rightStyle = activePanelStyle.Width(rightWidth).Height(contentHeight)
@@ -763,20 +756,10 @@ func (m Model) View() string {
 		leftStyle = activePanelStyle.Width(leftWidth).Height(contentHeight)
 	}
 
-	leftRendered := leftStyle.Render(leftPanel)
-	rightRendered := rightStyle.Render(rightPanel)
-	leftHeight := lipgloss.Height(leftRendered)
-	rightHeight := lipgloss.Height(rightRendered)
-	if rightHeight < leftHeight {
-		rightRendered += strings.Repeat("\n", leftHeight-rightHeight)
-	} else if leftHeight < rightHeight {
-		leftRendered += strings.Repeat("\n", rightHeight-leftHeight)
-	}
-
 	panels := lipgloss.JoinHorizontal(lipgloss.Top,
-		leftRendered,
+		leftStyle.Render(leftPanel),
 		" ",
-		rightRendered,
+		rightStyle.Render(rightPanel),
 	)
 
 	status := m.renderStatus(lipgloss.Width(panels))
@@ -859,7 +842,7 @@ func (m Model) renderFiles(width, height int) string {
 
 func (m Model) renderEntries(width, height int) string {
 	var sb strings.Builder
-	textWidth := width - 2 - leftPanelPadLeft - leftPanelPadRight
+	textWidth := width - 2
 
 	if m.currentSwt == nil {
 		return "No file loaded"
@@ -1162,7 +1145,7 @@ func (m Model) renderEntryPreview(width, height int) string {
 	sb.WriteString(commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + entry.TriggerName)
 
 	_ = width
-	return padToHeight(sb.String(), height)
+	return sb.String()
 }
 
 func (m Model) renderEditFields(width, height int) string {
@@ -1232,21 +1215,7 @@ func (m Model) renderEditFields(width, height int) string {
 	}
 
 	_ = width
-	return padToHeight(sb.String(), height)
-}
-
-func padToHeight(s string, height int) string {
-	if height <= 0 {
-		return s
-	}
-	if !strings.HasSuffix(s, "\n") {
-		s += "\n"
-	}
-	lines := lipgloss.Height(s)
-	if lines >= height {
-		return s
-	}
-	return s + strings.Repeat("\n", height-lines)
+	return sb.String()
 }
 
 func (m Model) renderStatus(totalWidth int) string {
