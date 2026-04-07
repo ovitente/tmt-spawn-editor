@@ -954,10 +954,7 @@ func (m Model) renderEntries(width, height int) string {
 		preset := e.Params[4]
 		owner := e.Owner()
 		zone := e.Zone()
-		typeLabel := ""
-		if e.EntityType() != "" {
-			typeLabel = "[" + e.EntityType() + "]"
-		}
+		typeLabel := e.EntityType()
 
 		rowPlain := formatEntryRow(unit, preset, owner, zone, typeLabel, unitWidth, presetWidth, ownerWidth, zoneWidth, typeWidth, sep)
 
@@ -1053,10 +1050,8 @@ func entryColumnWidths(entries []SpawnEntry, rowWidth int, sepWidth int) (int, i
 		if l := len(e.Zone()); l > zoneWidth {
 			zoneWidth = l
 		}
-		if e.EntityType() != "" {
-			if l := len("[" + e.EntityType() + "]"); l > typeWidth {
-				typeWidth = l
-			}
+		if l := len(e.EntityType()); l > typeWidth {
+			typeWidth = l
 		}
 	}
 
@@ -1132,6 +1127,60 @@ func desiredEntriesWidth(entries []SpawnEntry, title string, count int, minWidth
 		return maxWidth
 	}
 	return width
+}
+
+// dropVisibleCount returns how many droplist rows fit in the edit panel.
+// Edit panel reserves: 4 lines (title + gap) + paramCount rows + 2 lines
+// (blank + trigger row) = 18. Plus up to 2 "↑/↓ more" marker rows when the
+// list is scrolled. The droplist replaces 1 of those rows with its label,
+// so net overhead stays 20 and items use the rest.
+func dropVisibleCount(height, total int) int {
+	const baseLines = 20
+	avail := height - baseLines
+	if avail < 1 {
+		avail = 1
+	}
+	if avail >= total {
+		return total
+	}
+	return avail
+}
+
+// writeDropWindow writes a windowed slice of items around cursor into sb.
+func writeDropWindow(sb *strings.Builder, items []string, cursor, visible int) {
+	if visible < 1 {
+		visible = 1
+	}
+	if visible > len(items) {
+		visible = len(items)
+	}
+	scroll := 0
+	if cursor >= visible {
+		scroll = cursor - visible + 1
+	}
+	if scroll > len(items)-visible {
+		scroll = len(items) - visible
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	end := scroll + visible
+	if end > len(items) {
+		end = len(items)
+	}
+	if scroll > 0 {
+		sb.WriteString("    " + commentStyle.Render("↑ more") + "\n")
+	}
+	for i := scroll; i < end; i++ {
+		if i == cursor {
+			sb.WriteString("    " + selectorPrefix.Render("▶ ") + reorderHighlight.Render(items[i]) + "\n")
+		} else {
+			sb.WriteString("      " + items[i] + "\n")
+		}
+	}
+	if end < len(items) {
+		sb.WriteString("    " + commentStyle.Render("↓ more") + "\n")
+	}
 }
 
 func clampPanelLines(s string, maxLines int) string {
@@ -1217,13 +1266,7 @@ func (m Model) renderEditFields(width, height int) string {
 
 		if m.dropActive && m.fieldCursor == i {
 			sb.WriteString(selectorPrefix.Render("▶ ") + commentStyle.Render(fmt.Sprintf("%-12s", label)) + "\n")
-			for di, item := range m.dropItems {
-				if di == m.dropCursor {
-					sb.WriteString("    " + selectorPrefix.Render("▶ ") + reorderHighlight.Render(item) + "\n")
-				} else {
-					sb.WriteString("      " + item + "\n")
-				}
-			}
+			writeDropWindow(&sb, m.dropItems, m.dropCursor, dropVisibleCount(height, len(m.dropItems)))
 			continue
 		}
 
@@ -1252,13 +1295,7 @@ func (m Model) renderEditFields(width, height int) string {
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + searchInputStyle.Render(before+"█"+after) + "\n")
 	} else if m.dropActive && m.fieldCursor == paramCount {
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + "\n")
-		for di, item := range m.dropItems {
-			if di == m.dropCursor {
-				sb.WriteString("    " + selectorPrefix.Render("▶ ") + reorderHighlight.Render(item) + "\n")
-			} else {
-				sb.WriteString("      " + item + "\n")
-			}
-		}
+		writeDropWindow(&sb, m.dropItems, m.dropCursor, dropVisibleCount(height, len(m.dropItems)))
 	} else {
 		triggerVal := entry.TriggerName
 		sb.WriteString(prefix + commentStyle.Render(fmt.Sprintf("%-12s", "Trigger")) + " " + triggerVal + "\n")
