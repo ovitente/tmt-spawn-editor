@@ -6,10 +6,10 @@ See also [[architecture]], [[delivery]].
 
 ## Game paths
 
-Default game root via WSL.
+Default mod root (CLI flag `-mod`) is set in `main.go` and can be overridden.
 
 ```
-/mnt/d/SteamLibrary/steamapps/common/Terminator Dark Fate - Defiance/
+/home/det/play/Terminator Overhaul
 ```
 
 ## Runtime requirements
@@ -17,5 +17,4 @@ Default game root via WSL.
 Minimal requirements for building and running.
 
 - Terminal with 256-color support
-- WSL2 with access to Windows filesystem
 - Go 1.21+
