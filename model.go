@@ -512,6 +512,16 @@ func (m Model) updateEntries(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentSwt.Entries = append(m.currentSwt.Entries[:insertAt], append([]SpawnEntry{dup}, m.currentSwt.Entries[insertAt:]...)...)
 			m.entryCursor = insertAt
 			m.currentSwt.RecalcDirty()
+			if m.entryFilterActive {
+				m.updateEntryFilter()
+				for i, idx := range m.entryFilterIndices {
+					if idx == insertAt {
+						m.entryFilterCursor = i
+						m.entryCursor = insertAt
+						break
+					}
+				}
+			}
 		}
 	case key.Matches(msg, keys.Delete):
 		if len(m.currentSwt.Entries) > 0 {
