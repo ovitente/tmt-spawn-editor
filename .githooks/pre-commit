@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
+# @lat: [[tests]]
+set -euo pipefail
+
 export PATH="$HOME/.npm-global/bin:$PATH"
-if command -v lat >/dev/null 2>&1; then
-  export LAT_LLM_KEY="${LAT_LLM_KEY:-unused}"
-  lat check || exit 1
+export LAT_LLM_KEY="${LAT_LLM_KEY:-unused}"
+
+if ! command -v lat >/dev/null 2>&1; then
+  echo "WARNING: lat not found, skipping lat checks. Install with: npm install -g --prefix \$HOME/.npm-global lat.md"
+  exit 0
 fi
+
+echo "Running lat check..."
+lat check
+
+echo "Pre-commit checks passed."
