@@ -36,6 +36,11 @@ type ProfileState struct {
 	sorted        bool
 }
 
+const (
+	leftPanelPadLeft  = 1
+	leftPanelPadRight = 0
+)
+
 type Model struct {
 	profiles      []ProfileState
 	activeProfile int
@@ -750,7 +755,7 @@ func (m Model) View() string {
 	leftPanel = padToHeight(leftPanel, contentHeight)
 	rightPanel = padToHeight(rightPanel, contentHeight)
 
-	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight).PaddingLeft(1).PaddingRight(0)
+	leftStyle := panelStyle.Width(leftWidth).Height(contentHeight).PaddingLeft(leftPanelPadLeft).PaddingRight(leftPanelPadRight)
 	rightStyle := panelStyle.Width(rightWidth).Height(contentHeight)
 	if m.level == LevelEdit || m.dropActive || m.fieldEditing {
 		rightStyle = activePanelStyle.Width(rightWidth).Height(contentHeight)
@@ -758,10 +763,20 @@ func (m Model) View() string {
 		leftStyle = activePanelStyle.Width(leftWidth).Height(contentHeight)
 	}
 
+	leftRendered := leftStyle.Render(leftPanel)
+	rightRendered := rightStyle.Render(rightPanel)
+	leftHeight := lipgloss.Height(leftRendered)
+	rightHeight := lipgloss.Height(rightRendered)
+	if rightHeight < leftHeight {
+		rightRendered += strings.Repeat("\n", leftHeight-rightHeight)
+	} else if leftHeight < rightHeight {
+		leftRendered += strings.Repeat("\n", rightHeight-leftHeight)
+	}
+
 	panels := lipgloss.JoinHorizontal(lipgloss.Top,
-		leftStyle.Render(leftPanel),
+		leftRendered,
 		" ",
-		rightStyle.Render(rightPanel),
+		rightRendered,
 	)
 
 	status := m.renderStatus(lipgloss.Width(panels))
@@ -844,7 +859,7 @@ func (m Model) renderFiles(width, height int) string {
 
 func (m Model) renderEntries(width, height int) string {
 	var sb strings.Builder
-	textWidth := width - 2
+	textWidth := width - 2 - leftPanelPadLeft - leftPanelPadRight
 
 	if m.currentSwt == nil {
 		return "No file loaded"
@@ -1223,6 +1238,9 @@ func (m Model) renderEditFields(width, height int) string {
 func padToHeight(s string, height int) string {
 	if height <= 0 {
 		return s
+	}
+	if !strings.HasSuffix(s, "\n") {
+		s += "\n"
 	}
 	lines := lipgloss.Height(s)
 	if lines >= height {
