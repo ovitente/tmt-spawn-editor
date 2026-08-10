@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const defaultModPath = `/home/det/play/Terminator Overhaul`
+const defaultModPath = `/mnt/c/Program Files/Steam/steamapps/common/Terminator Dark Fate - Defiance/mods/TERMINATOR_OVERHAUL`
 
 type Profile struct {
 	Label   string
